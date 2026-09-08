@@ -26,8 +26,7 @@ document.body.appendChild(vrButton);
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.05, 20000);
 scene.add(camera);
 
-const hemi = new THREE.HemisphereLight(0xcfe9ff, 0x5d4934, 2.0);
-scene.add(hemi);
+scene.add(new THREE.HemisphereLight(0xcfe9ff, 0x5d4934, 2.0));
 const sun = new THREE.DirectionalLight(0xffffff, 2.5);
 sun.position.set(500, 900, 300);
 scene.add(sun);
@@ -46,12 +45,11 @@ grid.material.opacity = 0.23;
 grid.material.transparent = true;
 scene.add(grid);
 
-// Aircraft root. We move/rotate this object; the GLB stays as authored beneath it.
 const aircraft = new THREE.Group();
 scene.add(aircraft);
 
-// XR rig follows the aircraft. On VR entry we calibrate the current headset pose
-// onto the authored PilotEye node instead of placing the floor origin at PilotEye.
+// The XR camera is parented here. This group is moved so the Quest's real tracked
+// eye position coincides exactly with the GLB's authored PilotEye marker.
 const xrSeatRig = new THREE.Group();
 aircraft.add(xrSeatRig);
 
@@ -71,9 +69,7 @@ const REQUIRED_VR_NODES = [
 let modelRoot = null;
 let pilotEye = null;
 let pilotEyeTargetLocal = null;
-let modelLoaded = false;
 let modelMessage = 'Waiting for GLB…';
-let foundNodes = [];
 let xrNeedsSeatCalibration = false;
 let xrCalibrationFrames = 0;
 
@@ -85,7 +81,7 @@ loader.load(
     aircraft.add(modelRoot);
     modelRoot.updateMatrixWorld(true);
 
-    foundNodes = REQUIRED_VR_NODES.filter((name) => modelRoot.getObjectByName(name));
+    const foundNodes = REQUIRED_VR_NODES.filter((name) => modelRoot.getObjectByName(name));
     pilotEye = modelRoot.getObjectByName('PilotEye') || modelRoot.getObjectByName('SeatAnchor');
 
     if (pilotEye) {
@@ -96,15 +92,15 @@ loader.load(
 
     const box = new THREE.Box3().setFromObject(modelRoot);
     const size = box.getSize(new THREE.Vector3());
-    modelLoaded = true;
     modelMessage = `GLB loaded · ${foundNodes.length}/${REQUIRED_VR_NODES.length} VR nodes found · size ${size.x.toFixed(1)}×${size.y.toFixed(1)}×${size.z.toFixed(1)} m`;
+
     console.log('[Rendezook] VR nodes:', Object.fromEntries(REQUIRED_VR_NODES.map((n) => [n, !!modelRoot.getObjectByName(n)])));
-    console.log('[Rendezook] PilotEye target:', pilotEyeTargetLocal);
+    console.log('[Rendezook] PilotEye aircraft-local target:', pilotEyeTargetLocal?.toArray());
   },
   undefined,
   (err) => {
-    console.warn('[Rendezook] GLB not loaded yet:', err);
-    modelMessage = 'Upload assets/models/flanker_vr_quest3.glb, then reload.';
+    console.warn('[Rendezook] GLB load failed:', err);
+    modelMessage = 'Could not load assets/models/flanker_vr_quest3.glb';
   }
 );
 
@@ -143,7 +139,6 @@ function applyKeyboard(dt) {
 
 function getThumbstick(gamepad) {
   if (!gamepad) return { x: 0, y: 0 };
-  // Quest Touch generally exposes the thumbstick on axes 2/3.
   if (gamepad.axes.length >= 4) return { x: gamepad.axes[2] || 0, y: gamepad.axes[3] || 0 };
   return { x: gamepad.axes[0] || 0, y: gamepad.axes[1] || 0 };
 }
@@ -173,20 +168,13 @@ function applyXRControls(dt) {
 function updateFlight(dt) {
   state.throttle = THREE.MathUtils.clamp(state.throttle, 0, 1);
 
-  const minSpeed = 45;
-  const maxSpeed = 330;
-  const targetSpeed = THREE.MathUtils.lerp(minSpeed, maxSpeed, state.throttle);
+  const targetSpeed = THREE.MathUtils.lerp(45, 330, state.throttle);
   state.speed = THREE.MathUtils.damp(state.speed, targetSpeed, 1.5, dt);
 
-  const pitchRate = THREE.MathUtils.degToRad(38);
-  const rollRate = THREE.MathUtils.degToRad(80);
-  const yawRate = THREE.MathUtils.degToRad(24);
+  aircraft.rotateX(state.pitch * THREE.MathUtils.degToRad(38) * dt);
+  aircraft.rotateZ(-state.roll * THREE.MathUtils.degToRad(80) * dt);
+  aircraft.rotateY(-state.yaw * THREE.MathUtils.degToRad(24) * dt);
 
-  aircraft.rotateX(state.pitch * pitchRate * dt);
-  aircraft.rotateZ(-state.roll * rollRate * dt);
-  aircraft.rotateY(-state.yaw * yawRate * dt);
-
-  // Initial assumption: aircraft forward is local -Z. Easy to flip if the GLB proves opposite.
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(aircraft.quaternion).normalize();
   aircraft.position.addScaledVector(forward, state.speed * dt);
 
@@ -206,9 +194,9 @@ function updateDesktopCamera(dt) {
 
 renderer.xr.addEventListener('sessionstart', () => {
   xrSeatRig.add(camera);
-  xrSeatRig.position.set(0, 0, 0);
   camera.position.set(0, 0, 0);
   camera.quaternion.identity();
+  xrSeatRig.position.set(0, 0, 0);
   xrCalibrationFrames = 0;
   xrNeedsSeatCalibration = true;
 });
@@ -218,25 +206,29 @@ renderer.xr.addEventListener('sessionend', () => {
   scene.add(camera);
 });
 
-function calibrateXRSeatAfterRender() {
-  if (!xrNeedsSeatCalibration || !renderer.xr.isPresenting || !pilotEyeTargetLocal) return;
+function calibrateXRSeat(frame) {
+  if (!xrNeedsSeatCalibration || !frame || !pilotEyeTargetLocal) return;
 
-  // Wait a couple of rendered XR frames so Three.js has populated the camera with
-  // the Quest's real local-floor headset pose (including the user's real eye height).
+  const referenceSpace = renderer.xr.getReferenceSpace();
+  if (!referenceSpace) return;
+
+  const viewerPose = frame.getViewerPose(referenceSpace);
+  if (!viewerPose) return;
+
+  // Give tracking one frame to settle, then use the genuine Quest viewer transform.
   xrCalibrationFrames += 1;
   if (xrCalibrationFrames < 2) return;
 
-  const trackedHeadLocal = camera.position.clone();
-  if (!Number.isFinite(trackedHeadLocal.y) || trackedHeadLocal.lengthSq() < 0.01) return;
+  const p = viewerPose.transform.position;
+  const trackedHead = new THREE.Vector3(p.x, p.y, p.z);
 
-  // Shift the aircraft-relative XR origin so the user's current eyes coincide with
-  // the authored PilotEye point. This works whether the user is sitting or standing.
-  xrSeatRig.position.copy(pilotEyeTargetLocal).sub(trackedHeadLocal);
+  xrSeatRig.position.copy(pilotEyeTargetLocal).sub(trackedHead);
   xrSeatRig.updateMatrixWorld(true);
   xrNeedsSeatCalibration = false;
-  console.log('[Rendezook] XR cockpit calibrated', {
-    trackedHeadLocal: trackedHeadLocal.toArray(),
-    pilotEyeTargetLocal: pilotEyeTargetLocal.toArray(),
+
+  console.log('[Rendezook] XR cockpit calibrated from viewer pose', {
+    trackedHead: trackedHead.toArray(),
+    pilotEye: pilotEyeTargetLocal.toArray(),
     rigOffset: xrSeatRig.position.toArray()
   });
 }
@@ -248,20 +240,21 @@ function updateHud() {
 }
 
 const clock = new THREE.Clock();
-renderer.setAnimationLoop(() => {
+renderer.setAnimationLoop((time, frame) => {
   const dt = Math.min(clock.getDelta(), 1 / 20);
 
   state.pitch = 0;
   state.roll = 0;
   state.yaw = 0;
+
   applyKeyboard(dt);
   applyXRControls(dt);
   updateFlight(dt);
   updateDesktopCamera(dt);
+  calibrateXRSeat(frame);
   updateHud();
 
   renderer.render(scene, camera);
-  calibrateXRSeatAfterRender();
 });
 
 window.addEventListener('resize', () => {
