@@ -50,9 +50,9 @@ scene.add(grid);
 const aircraft = new THREE.Group();
 scene.add(aircraft);
 
-// XR seat rig is parented to the aircraft so the headset naturally follows it.
+// XR rig follows the aircraft. On VR entry we calibrate the current headset pose
+// onto the authored PilotEye node instead of placing the floor origin at PilotEye.
 const xrSeatRig = new THREE.Group();
-xrSeatRig.position.set(0, 1.5, 0);
 aircraft.add(xrSeatRig);
 
 const REQUIRED_VR_NODES = [
@@ -70,9 +70,12 @@ const REQUIRED_VR_NODES = [
 
 let modelRoot = null;
 let pilotEye = null;
+let pilotEyeTargetLocal = null;
 let modelLoaded = false;
 let modelMessage = 'Waiting for GLB…';
 let foundNodes = [];
+let xrNeedsSeatCalibration = false;
+let xrCalibrationFrames = 0;
 
 const loader = new GLTFLoader();
 loader.load(
@@ -88,7 +91,7 @@ loader.load(
     if (pilotEye) {
       const eyeWorld = new THREE.Vector3();
       pilotEye.getWorldPosition(eyeWorld);
-      xrSeatRig.position.copy(aircraft.worldToLocal(eyeWorld.clone()));
+      pilotEyeTargetLocal = aircraft.worldToLocal(eyeWorld.clone());
     }
 
     const box = new THREE.Box3().setFromObject(modelRoot);
@@ -96,6 +99,7 @@ loader.load(
     modelLoaded = true;
     modelMessage = `GLB loaded · ${foundNodes.length}/${REQUIRED_VR_NODES.length} VR nodes found · size ${size.x.toFixed(1)}×${size.y.toFixed(1)}×${size.z.toFixed(1)} m`;
     console.log('[Rendezook] VR nodes:', Object.fromEntries(REQUIRED_VR_NODES.map((n) => [n, !!modelRoot.getObjectByName(n)])));
+    console.log('[Rendezook] PilotEye target:', pilotEyeTargetLocal);
   },
   undefined,
   (err) => {
@@ -202,13 +206,40 @@ function updateDesktopCamera(dt) {
 
 renderer.xr.addEventListener('sessionstart', () => {
   xrSeatRig.add(camera);
+  xrSeatRig.position.set(0, 0, 0);
   camera.position.set(0, 0, 0);
   camera.quaternion.identity();
+  xrCalibrationFrames = 0;
+  xrNeedsSeatCalibration = true;
 });
 
 renderer.xr.addEventListener('sessionend', () => {
+  xrNeedsSeatCalibration = false;
   scene.add(camera);
 });
+
+function calibrateXRSeatAfterRender() {
+  if (!xrNeedsSeatCalibration || !renderer.xr.isPresenting || !pilotEyeTargetLocal) return;
+
+  // Wait a couple of rendered XR frames so Three.js has populated the camera with
+  // the Quest's real local-floor headset pose (including the user's real eye height).
+  xrCalibrationFrames += 1;
+  if (xrCalibrationFrames < 2) return;
+
+  const trackedHeadLocal = camera.position.clone();
+  if (!Number.isFinite(trackedHeadLocal.y) || trackedHeadLocal.lengthSq() < 0.01) return;
+
+  // Shift the aircraft-relative XR origin so the user's current eyes coincide with
+  // the authored PilotEye point. This works whether the user is sitting or standing.
+  xrSeatRig.position.copy(pilotEyeTargetLocal).sub(trackedHeadLocal);
+  xrSeatRig.updateMatrixWorld(true);
+  xrNeedsSeatCalibration = false;
+  console.log('[Rendezook] XR cockpit calibrated', {
+    trackedHeadLocal: trackedHeadLocal.toArray(),
+    pilotEyeTargetLocal: pilotEyeTargetLocal.toArray(),
+    rigOffset: xrSeatRig.position.toArray()
+  });
+}
 
 function updateHud() {
   const altitude = Math.max(0, aircraft.position.y).toFixed(0);
@@ -230,6 +261,7 @@ renderer.setAnimationLoop(() => {
   updateHud();
 
   renderer.render(scene, camera);
+  calibrateXRSeatAfterRender();
 });
 
 window.addEventListener('resize', () => {
