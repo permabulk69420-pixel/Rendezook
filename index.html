@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0a1422" />
+  <title>Rendezook Flight Test</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #08111d; font-family: system-ui, sans-serif; }
+    canvas { display: block; }
+    #hud { position: fixed; z-index: 10; top: 12px; left: 12px; max-width: min(420px, calc(100vw - 24px)); padding: 10px 12px; border-radius: 10px; color: #e9f2ff; background: rgba(5, 12, 22, .72); backdrop-filter: blur(8px); font-size: 13px; line-height: 1.35; pointer-events: none; }
+    #hud b { color: white; }
+    #status { margin-top: 6px; color: #bcd4ef; }
+    #vrButton { z-index: 20 !important; }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <b>RENDEZOOK // FLIGHT TEST</b><br>
+    W/S throttle · arrows pitch/roll · Q/E yaw · R reset<br>
+    Quest: enter VR; thumbsticks are temporarily mapped to flight.
+    <div id="status">Booting…</div>
+  </div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
