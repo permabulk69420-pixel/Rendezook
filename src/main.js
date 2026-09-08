@@ -16,7 +16,12 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 renderer.xr.enabled = true;
-renderer.xr.setReferenceSpaceType('local-floor');
+
+// IMPORTANT: use a head-relative local space, not local-floor.
+// The cockpit's authored PilotEye node becomes the VR origin. This avoids adding
+// the user's real-world standing/sitting height on top of the model's eye height.
+renderer.xr.setReferenceSpaceType('local');
+
 document.body.appendChild(renderer.domElement);
 
 const vrButton = VRButton.createButton(renderer);
@@ -48,9 +53,10 @@ scene.add(grid);
 const aircraft = new THREE.Group();
 scene.add(aircraft);
 
-// The XR camera is parented here. This group is moved so the Quest's real tracked
-// eye position coincides exactly with the GLB's authored PilotEye marker.
+// In VR this is the cockpit tracking origin. It is positioned directly at PilotEye.
+// Head motion from Quest is then applied relative to this point by WebXR.
 const xrSeatRig = new THREE.Group();
+xrSeatRig.name = 'XRSeatRig';
 aircraft.add(xrSeatRig);
 
 const REQUIRED_VR_NODES = [
@@ -70,8 +76,15 @@ let modelRoot = null;
 let pilotEye = null;
 let pilotEyeTargetLocal = null;
 let modelMessage = 'Waiting for GLB…';
-let xrNeedsSeatCalibration = false;
-let xrCalibrationFrames = 0;
+
+function placeXRAtPilotEye() {
+  if (!pilotEyeTargetLocal) return;
+  xrSeatRig.position.copy(pilotEyeTargetLocal);
+  xrSeatRig.quaternion.identity();
+  xrSeatRig.scale.set(1, 1, 1);
+  xrSeatRig.updateMatrixWorld(true);
+  console.log('[Rendezook] XR origin placed at PilotEye:', pilotEyeTargetLocal.toArray());
+}
 
 const loader = new GLTFLoader();
 loader.load(
@@ -88,6 +101,7 @@ loader.load(
       const eyeWorld = new THREE.Vector3();
       pilotEye.getWorldPosition(eyeWorld);
       pilotEyeTargetLocal = aircraft.worldToLocal(eyeWorld.clone());
+      placeXRAtPilotEye();
     }
 
     const box = new THREE.Box3().setFromObject(modelRoot);
@@ -196,42 +210,12 @@ renderer.xr.addEventListener('sessionstart', () => {
   xrSeatRig.add(camera);
   camera.position.set(0, 0, 0);
   camera.quaternion.identity();
-  xrSeatRig.position.set(0, 0, 0);
-  xrCalibrationFrames = 0;
-  xrNeedsSeatCalibration = true;
+  placeXRAtPilotEye();
 });
 
 renderer.xr.addEventListener('sessionend', () => {
-  xrNeedsSeatCalibration = false;
   scene.add(camera);
 });
-
-function calibrateXRSeat(frame) {
-  if (!xrNeedsSeatCalibration || !frame || !pilotEyeTargetLocal) return;
-
-  const referenceSpace = renderer.xr.getReferenceSpace();
-  if (!referenceSpace) return;
-
-  const viewerPose = frame.getViewerPose(referenceSpace);
-  if (!viewerPose) return;
-
-  // Give tracking one frame to settle, then use the genuine Quest viewer transform.
-  xrCalibrationFrames += 1;
-  if (xrCalibrationFrames < 2) return;
-
-  const p = viewerPose.transform.position;
-  const trackedHead = new THREE.Vector3(p.x, p.y, p.z);
-
-  xrSeatRig.position.copy(pilotEyeTargetLocal).sub(trackedHead);
-  xrSeatRig.updateMatrixWorld(true);
-  xrNeedsSeatCalibration = false;
-
-  console.log('[Rendezook] XR cockpit calibrated from viewer pose', {
-    trackedHead: trackedHead.toArray(),
-    pilotEye: pilotEyeTargetLocal.toArray(),
-    rigOffset: xrSeatRig.position.toArray()
-  });
-}
 
 function updateHud() {
   const altitude = Math.max(0, aircraft.position.y).toFixed(0);
@@ -240,7 +224,7 @@ function updateHud() {
 }
 
 const clock = new THREE.Clock();
-renderer.setAnimationLoop((time, frame) => {
+renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 1 / 20);
 
   state.pitch = 0;
@@ -251,7 +235,6 @@ renderer.setAnimationLoop((time, frame) => {
   applyXRControls(dt);
   updateFlight(dt);
   updateDesktopCamera(dt);
-  calibrateXRSeat(frame);
   updateHud();
 
   renderer.render(scene, camera);
