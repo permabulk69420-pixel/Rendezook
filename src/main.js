@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { createVRHands } from './hands.js';
+import { createCockpitControls } from './cockpit-controls.js';
 
 const MODEL_URL = './assets/models/flanker_vr_quest3.glb';
 const statusEl = document.querySelector('#status');
@@ -17,9 +19,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 renderer.xr.enabled = true;
 
-// IMPORTANT: use a head-relative local space, not local-floor.
-// The cockpit's authored PilotEye node becomes the VR origin. This avoids adding
-// the user's real-world standing/sitting height on top of the model's eye height.
+// Head-relative local space: the authored PilotEye node is our cockpit tracking origin.
 renderer.xr.setReferenceSpaceType('local');
 
 document.body.appendChild(renderer.domElement);
@@ -53,11 +53,24 @@ scene.add(grid);
 const aircraft = new THREE.Group();
 scene.add(aircraft);
 
-// In VR this is the cockpit tracking origin. It is positioned directly at PilotEye.
-// Head motion from Quest is then applied relative to this point by WebXR.
+// Camera, controller grips and rendered hands all live in this moving aircraft-local rig.
 const xrSeatRig = new THREE.Group();
 xrSeatRig.name = 'XRSeatRig';
 aircraft.add(xrSeatRig);
+
+const vrHands = createVRHands({
+  renderer,
+  parent: xrSeatRig,
+  onError: (message) => console.warn('[Rendezook hands]', message)
+});
+
+const state = {
+  throttle: 0.35,
+  speed: 90,
+  pitch: 0,
+  roll: 0,
+  yaw: 0
+};
 
 const REQUIRED_VR_NODES = [
   'AircraftOrigin',
@@ -67,14 +80,15 @@ const REQUIRED_VR_NODES = [
   'FlightStickGrip',
   'ThrottlePivot',
   'ThrottleGrip',
-  'RudderPedalL',
-  'RudderPedalR',
+  'RudderPedal_L',
+  'RudderPedal_R',
   'CanopyHinge'
 ];
 
 let modelRoot = null;
 let pilotEye = null;
 let pilotEyeTargetLocal = null;
+let cockpitControls = null;
 let modelMessage = 'Waiting for GLB…';
 
 function placeXRAtPilotEye() {
@@ -94,8 +108,9 @@ loader.load(
     aircraft.add(modelRoot);
     modelRoot.updateMatrixWorld(true);
 
-    const foundNodes = REQUIRED_VR_NODES.filter((name) => modelRoot.getObjectByName(name));
-    pilotEye = modelRoot.getObjectByName('PilotEye') || modelRoot.getObjectByName('SeatAnchor');
+    const nodeMap = Object.fromEntries(REQUIRED_VR_NODES.map((name) => [name, modelRoot.getObjectByName(name) || null]));
+    const foundNodes = REQUIRED_VR_NODES.filter((name) => nodeMap[name]);
+    pilotEye = nodeMap.PilotEye || nodeMap.SeatAnchor;
 
     if (pilotEye) {
       const eyeWorld = new THREE.Vector3();
@@ -104,12 +119,28 @@ loader.load(
       placeXRAtPilotEye();
     }
 
+    if (nodeMap.FlightStickPivot && nodeMap.FlightStickGrip && nodeMap.ThrottlePivot && nodeMap.ThrottleGrip) {
+      cockpitControls = createCockpitControls({
+        flightStickPivot: nodeMap.FlightStickPivot,
+        flightStickGrip: nodeMap.FlightStickGrip,
+        throttlePivot: nodeMap.ThrottlePivot,
+        throttleGrip: nodeMap.ThrottleGrip,
+        handStates: vrHands.states,
+        flightState: state,
+        setHandGrip: (handedness, active, amount) => vrHands.setControlGrip(handedness, active, amount),
+        pulseHand: (handedness, strength, durationMs) => vrHands.pulse(handedness, strength, durationMs)
+      });
+    } else {
+      console.warn('[Rendezook] Physical cockpit controls disabled: stick/throttle anchors are incomplete.');
+    }
+
     const box = new THREE.Box3().setFromObject(modelRoot);
     const size = box.getSize(new THREE.Vector3());
     modelMessage = `GLB loaded · ${foundNodes.length}/${REQUIRED_VR_NODES.length} VR nodes found · size ${size.x.toFixed(1)}×${size.y.toFixed(1)}×${size.z.toFixed(1)} m`;
 
-    console.log('[Rendezook] VR nodes:', Object.fromEntries(REQUIRED_VR_NODES.map((n) => [n, !!modelRoot.getObjectByName(n)])));
+    console.log('[Rendezook] VR nodes:', Object.fromEntries(REQUIRED_VR_NODES.map((name) => [name, Boolean(nodeMap[name])])));
     console.log('[Rendezook] PilotEye aircraft-local target:', pilotEyeTargetLocal?.toArray());
+    console.log('[Rendezook] Physical stick/throttle:', Boolean(cockpitControls));
   },
   undefined,
   (err) => {
@@ -117,14 +148,6 @@ loader.load(
     modelMessage = 'Could not load assets/models/flanker_vr_quest3.glb';
   }
 );
-
-const state = {
-  throttle: 0.35,
-  speed: 90,
-  pitch: 0,
-  roll: 0,
-  yaw: 0
-};
 
 const keys = new Set();
 window.addEventListener('keydown', (e) => {
@@ -139,6 +162,7 @@ function resetAircraft() {
   aircraft.quaternion.identity();
   state.throttle = 0.35;
   state.speed = 90;
+  cockpitControls?.reset();
 }
 resetAircraft();
 
@@ -169,11 +193,13 @@ function applyXRControls(dt) {
     if (source.handedness === 'right') right = getThumbstick(source.gamepad);
   }
 
+  // Keep thumbsticks as a fallback while the physical cockpit controls are being tuned.
   if (left) {
     state.yaw = THREE.MathUtils.clamp(left.x, -1, 1);
-    state.throttle += -left.y * 0.28 * dt;
+    if (!cockpitControls?.isThrottleGrabbed()) state.throttle += -left.y * 0.28 * dt;
   }
-  if (right) {
+
+  if (right && !cockpitControls?.isStickGrabbed()) {
     state.roll = THREE.MathUtils.clamp(right.x, -1, 1);
     state.pitch = THREE.MathUtils.clamp(right.y, -1, 1);
   }
@@ -220,7 +246,9 @@ renderer.xr.addEventListener('sessionend', () => {
 function updateHud() {
   const altitude = Math.max(0, aircraft.position.y).toFixed(0);
   const knots = (state.speed * 1.94384).toFixed(0);
-  statusEl.textContent = `${modelMessage} · throttle ${(state.throttle * 100).toFixed(0)}% · ${knots} kt · ${altitude} m`;
+  const stick = cockpitControls?.isStickGrabbed() ? 'stick GRABBED' : 'stick free';
+  const throttle = cockpitControls?.isThrottleGrabbed() ? 'throttle GRABBED' : 'throttle free';
+  statusEl.textContent = `${modelMessage} · throttle ${(state.throttle * 100).toFixed(0)}% · ${knots} kt · ${altitude} m · ${stick} · ${throttle}`;
 }
 
 const clock = new THREE.Clock();
@@ -233,6 +261,8 @@ renderer.setAnimationLoop(() => {
 
   applyKeyboard(dt);
   applyXRControls(dt);
+  cockpitControls?.update(dt);
+  vrHands.update(dt);
   updateFlight(dt);
   updateDesktopCamera(dt);
   updateHud();
