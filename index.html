@@ -8,7 +8,7 @@
   <style>
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #08111d; font-family: system-ui, sans-serif; }
     canvas { display: block; }
-    #hud { position: fixed; z-index: 10; top: 12px; left: 12px; max-width: min(420px, calc(100vw - 24px)); padding: 10px 12px; border-radius: 10px; color: #e9f2ff; background: rgba(5, 12, 22, .72); backdrop-filter: blur(8px); font-size: 13px; line-height: 1.35; pointer-events: none; }
+    #hud { position: fixed; z-index: 10; top: 12px; left: 12px; max-width: min(460px, calc(100vw - 24px)); padding: 10px 12px; border-radius: 10px; color: #e9f2ff; background: rgba(5, 12, 22, .72); backdrop-filter: blur(8px); font-size: 13px; line-height: 1.35; pointer-events: none; }
     #hud b { color: white; }
     #status { margin-top: 6px; color: #bcd4ef; }
     #vrButton { z-index: 20 !important; }
@@ -26,7 +26,7 @@
   <div id="hud">
     <b>RENDEZOOK // FLIGHT TEST</b><br>
     W/S throttle · arrows pitch/roll · Q/E yaw · R reset<br>
-    Quest: enter VR; thumbsticks are temporarily mapped to flight.
+    Quest: right grip grabs the flight stick · left grip grabs the throttle · thumbsticks remain fallback controls.
     <div id="status">Booting…</div>
   </div>
   <script type="module" src="./src/main.js"></script>
